@@ -2309,6 +2309,15 @@ mdb_page_dirty(MDB_txn *txn, MDB_page *mp)
  *  will always be satisfied by a single contiguous chunk of memory.
  * @return 0 on success, non-zero on failure.
  */
+/*
+ * 这个函数的关键在于分配写入page的page id
+ * 因为page大小固定，因此这个page id就决定了
+ * 这个page到底位于数据库文件的哪个位置(offset)
+ * 
+ * 按照我们最原始的想法是: 尽量复用不再被引用的page id
+ * 如果实在没有这种page id,再扩张page id(意味着数据库文件enlarge)
+ *
+ * */
 static int
 mdb_page_alloc(MDB_cursor *mc, int num, MDB_page **mp)
 {
@@ -2326,6 +2335,7 @@ mdb_page_alloc(MDB_cursor *mc, int num, MDB_page **mp)
 	int rc, retry = num * 60;
 	MDB_txn *txn = mc->mc_txn;
 	MDB_env *env = txn->mt_env;
+	// TODO: env->me_pghead是什么
 	pgno_t pgno, *mop = env->me_pghead;
 	unsigned i, j, mop_len = mop ? mop[0] : 0, n2 = num-1;
 	MDB_page *np;
@@ -2335,6 +2345,7 @@ mdb_page_alloc(MDB_cursor *mc, int num, MDB_page **mp)
 	int found_old = 0;
 
 	/* If there are any loose pages, just use them */
+	// TODO: 什么是loose_pgs ?
 	if (num == 1 && txn->mt_loose_pgs) {
 		np = txn->mt_loose_pgs;
 		txn->mt_loose_pgs = NEXT_LOOSE_PAGE(np);
@@ -2352,6 +2363,9 @@ mdb_page_alloc(MDB_cursor *mc, int num, MDB_page **mp)
 		goto fail;
 	}
 
+	// 分配算法:
+	// 1. 如果系统中存在这样的读事务rtx(oldest), 其txnid < = 上一次释放page的写事务txnid更小(last),此时其上一次释放的page不可被复用
+	// 2. 否则，就可以确保上次写事务释放的page不会再有其他读事务所reference，可以放心复用以前释放的page
 	for (op = MDB_FIRST;; op = MDB_NEXT) {
 		MDB_val key, data;
 		MDB_node *leaf;
@@ -2360,6 +2374,7 @@ mdb_page_alloc(MDB_cursor *mc, int num, MDB_page **mp)
 		/* Seek a big enough contiguous page range. Prefer
 		 * pages at the tail, just truncating the list.
 		 */
+		// TODO: mop是什么鬼玩意儿?
 		if (mop_len > n2) {
 			i = mop_len;
 			do {
@@ -2475,8 +2490,10 @@ mdb_page_alloc(MDB_cursor *mc, int num, MDB_page **mp)
 #endif
 
 search_done:
+	// 如果使用了MAP机制
 	if (env->me_flags & MDB_WRITEMAP) {
 		np = (MDB_page *)(env->me_map + env->me_psize * pgno);
+	// 否则从内存中分配num个page
 	} else {
 		if (!(np = mdb_page_malloc(txn, num))) {
 			rc = ENOMEM;
@@ -2489,8 +2506,11 @@ search_done:
 		for (j = i-num; j < mop_len; )
 			mop[++j] = mop[++i];
 	} else {
+		// 因为分配了num个page,下次分配新page的时候
+		// 起始page id就从pgno + num开始了
 		txn->mt_next_pgno = pgno + num;
 	}
+	printf("allocate page = %d\n", pgno);
 	np->mp_pgno = pgno;
 	mdb_page_dirty(txn, np);
 	*mp = np;
@@ -2617,6 +2637,10 @@ mdb_page_touch(MDB_cursor *mc)
 		DPRINTF(("touched db %d page %"Yu" -> %"Yu, DDBI(mc),
 			mp->mp_pgno, pgno));
 		mdb_cassert(mc, mp->mp_pgno != pgno);
+		// Note: COW: 将原始的page(mp)放入mt_free_pgs链表
+		// 以后在本事务中使用新创建(mdb_page_alloc)出的page(np)
+		// 在txn.commit中调用mdb_freelist_save()来处理这些free pages
+		printf("add page %d to free page list\n", mp->mp_pgno);
 		mdb_midl_xappend(txn->mt_free_pgs, mp->mp_pgno);
 		/* Update the parent page, if any, to point to the new page */
 		if (mc->mc_top) {
@@ -2947,7 +2971,7 @@ mdb_txn_renew0(MDB_txn *txn)
 	} else {
 		/* Not yet touching txn == env->me_txn0, it may be active */
 		if (ti) {
-			printf("ti is not null\n");
+			// printf("ti is not null\n");
 			if (LOCK_MUTEX(rc, env, env->me_wmutex))
 				return rc;
 			txn->mt_txnid = ti->mti_txnid;
@@ -3401,6 +3425,12 @@ mdb_freelist_save(MDB_txn *txn)
 			} while (freecnt < free_pgs[0]);
 			mdb_midl_sort(free_pgs);
 			memcpy(data.mv_data, free_pgs, data.mv_size);
+			
+			{
+				unsigned int k = free_pgs[0];
+				for (; k; k--)
+					printf("free page: %d\n", free_pgs[k]);
+			}
 #if (MDB_DEBUG) > 1
 			{
 				unsigned int i = free_pgs[0];
@@ -7542,8 +7572,10 @@ current:
 	rdata = data;
 
 new_sub:
+	// 不考虑上述诸多的if else,正常的写入进入该流程
 	nflags = flags & NODE_ADD_FLAGS;
 	nsize = IS_LEAF2(mc->mc_pg[mc->mc_top]) ? key->mv_size : mdb_leaf_size(env, key, rdata);
+	// 当前欲插入的page空间不足,需要进行page分裂
 	if (SIZELEFT(mc->mc_pg[mc->mc_top]) < nsize) {
 		if (( flags & (F_DUPDATA|F_SUBDATA)) == F_DUPDATA )
 			nflags &= ~MDB_APPEND; /* sub-page may need room to grow */
@@ -7552,6 +7584,7 @@ new_sub:
 		rc = mdb_page_split(mc, key, rdata, P_INVALID, nflags);
 	} else {
 		/* There is room already in this leaf page. */
+		// 在当前page中插入kv作为新节点
 		rc = mdb_node_add(mc, mc->mc_ki[mc->mc_top], key, rdata, 0, nflags);
 		if (rc == 0) {
 			/* Adjust other cursors pointing to mp */
@@ -7653,6 +7686,7 @@ put_sub:
 			 */
 			mc->mc_flags |= C_INITIALIZED;
 		}
+		// 这些标记位暂时可以忽略
 		if (flags & MDB_MULTIPLE) {
 			if (!rc) {
 				mcount++;

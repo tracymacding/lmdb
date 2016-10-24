@@ -41,7 +41,7 @@ IHDRS	= lmdb.h
 ILIBS	= liblmdb.a liblmdb$(SOEXT)
 IPROGS	= mdb_stat mdb_copy mdb_dump mdb_load
 IDOCS	= mdb_stat.1 mdb_copy.1 mdb_dump.1 mdb_load.1
-PROGS	= $(IPROGS) mtest mtest2 mtest3 mtest4 mtest5 sample
+PROGS	= $(IPROGS) mtest mtest2 mtest3 mtest4 mtest5 sample bench read write
 all:	$(ILIBS) $(PROGS)
 
 install: $(ILIBS) $(IPROGS) $(IHDRS)
@@ -79,9 +79,21 @@ mtest4:	mtest4.o liblmdb.a
 mtest5:	mtest5.o liblmdb.a
 mtest6:	mtest6.o liblmdb.a
 sample:	sample.o liblmdb.a
+bench:	bench.o liblmdb.a
+read:	read.o liblmdb.a
+write:	write.o liblmdb.a
 
 sample.o: sample.c lmdb.h midl.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c sample.c
+
+bench.o: bench.c lmdb.h midl.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c bench.c
+
+read.o: read.c lmdb.h midl.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c read.c
+
+write.o: write.c lmdb.h midl.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c write.c
 
 mdb.o: mdb.c lmdb.h midl.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c mdb.c
